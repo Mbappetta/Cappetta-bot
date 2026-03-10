@@ -1,0 +1,55 @@
+# Cappetta Bot 🎨
+
+Bot Discord pour le serveur **Cappetta | Le Sanctuaire**
+
+## Fonctionnalités
+- 🤖 **Modération automatique** — Claude analyse chaque message, supprime les contenus inappropriés et log dans #Support
+- 🔴 **Alertes Twitch** — notifie dans `| En LIVE` quand Cappetta part en live
+- 🎵 **Alertes TikTok** — notifie dans `| Social-media` quand une nouvelle vidéo est postée
+
+---
+
+## Déploiement sur Render (gratuit)
+
+### Étape 1 — Clés Twitch
+1. Va sur https://dev.twitch.tv/console/apps
+2. Clique **Register Your Application**
+3. Nom : `CappettaBot` · OAuth : `http://localhost` · Catégorie : `Chat Bot`
+4. Copie le **Client ID** et génère un **Client Secret**
+
+### Étape 2 — Mettre le code sur GitHub
+1. Crée un compte GitHub (github.com) si pas déjà fait
+2. Nouveau repo → `cappetta-bot` (privé)
+3. Upload les fichiers : `main.py`, `requirements.txt`
+
+### Étape 3 — Déployer sur Render
+1. Va sur https://render.com → **New Web Service**
+2. Connecte ton repo GitHub `cappetta-bot`
+3. Paramètres :
+   - **Runtime** : Python 3
+   - **Build Command** : `pip install -r requirements.txt`
+   - **Start Command** : `python main.py`
+4. Dans **Environment Variables**, ajoute :
+
+| Clé | Valeur |
+|-----|--------|
+| `DISCORD_TOKEN` | Ton token Discord bot |
+| `ANTHROPIC_API_KEY` | Ta clé API Anthropic |
+| `TWITCH_CLIENT_ID` | Ton Client ID Twitch |
+| `TWITCH_SECRET` | Ton Client Secret Twitch |
+
+5. Clique **Deploy** → c'est parti ! 🚀
+
+---
+
+## Commandes (admin uniquement)
+- `!status` — voir l'état du bot
+- `!testlive` — tester l'alerte live
+- `!testtiktok` — tester l'alerte TikTok
+
+---
+
+## Structure des salons requis
+- `| En LIVE` — alertes streams Twitch
+- `| Social-media` — alertes TikTok
+- `| Support` — logs de modération
