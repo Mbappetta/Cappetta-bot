@@ -1,11 +1,26 @@
 import discord
 from discord.ext import commands, tasks
 import aiohttp
+import asyncio
 import os
 import json
-import asyncio
 import re
 from datetime import datetime
+from aiohttp import web
+
+# ── SERVEUR HTTP (requis pour Render free tier) ───────────────────────────────
+async def handle_ping(request):
+    return web.Response(text="Cappetta Bot is alive! 🤖")
+
+async def start_webserver():
+    app = web.Application()
+    app.router.add_get("/", handle_ping)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    port = int(os.environ.get("PORT", 10000))
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+    print(f"[Web] Serveur HTTP démarré sur le port {port} ✓")
 
 # ── CONFIG ────────────────────────────────────────────────────────────────────
 DISCORD_TOKEN      = os.environ.get("DISCORD_TOKEN")
@@ -17,288 +32,269 @@ TWITCH_USERNAME    = "Cappetta"
 TIKTOK_USERNAME    = "cappetta_art"
 INSTAGRAM_USERNAME = "cappetta_art"
 
-SALON_LIVE    = "en live"       # contenu partiel du nom de salon
-SALON_SOCIAL  = "social-media"
-SALON_SUPPORT = "support"
+SALON_LIVE         = "| En LIVE"
+SALON_SOCIAL       = "| Social-media"
+SALON_SUPPORT      = "| Support"
 
 # ── INTENTS ───────────────────────────────────────────────────────────────────
 intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
-intents.presences = True
-
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# ── ÉTAT ──────────────────────────────────────────────────────────────────────
-twitch_token       = None
-twitch_was_live    = False
-last_tiktok_url    = None
-last_instagram_url = None
+# ── STATE ─────────────────────────────────────────────────────────────────────
+twitch_access_token = None
+was_live            = False
+last_tiktok_url     = None
+last_instagram_url  = None
 
-# ── UTILITAIRES ───────────────────────────────────────────────────────────────
-def get_channel(guild, keyword):
-    for ch in guild.text_channels:
-        if keyword.lower() in ch.name.lower():
-            return ch
-    return None
+# ── UTILS ─────────────────────────────────────────────────────────────────────
+def get_channel(guild, name):
+    return discord.utils.get(guild.text_channels, name=name)
 
-# ── MODÉRATION IA ─────────────────────────────────────────────────────────────
-async def analyze_message(content: str) -> dict:
-    headers = {
-        "x-api-key": ANTHROPIC_API_KEY,
-        "anthropic-version": "2023-06-01",
-        "content-type": "application/json",
-    }
-    payload = {
-        "model": "claude-haiku-4-5-20251001",
-        "max_tokens": 150,
-        "messages": [{
-            "role": "user",
-            "content": (
-                "Tu es modérateur d'un serveur Discord d'art manga francophone. "
-                "Analyse ce message. Réponds UNIQUEMENT en JSON strict, sans markdown :\n"
-                '{"violation": true/false, "type": "insulte|harcèlement|contenu_adulte|spam|aucun", "raison": "..."}\n\n'
-                f"Message : {content[:500]}"
-            )
-        }]
-    }
+# ── MODÉRATION ────────────────────────────────────────────────────────────────
+async def moderer_message(message):
+    if not ANTHROPIC_API_KEY:
+        return
+    prompt = (
+        "Analyse ce message Discord et réponds UNIQUEMENT en JSON valide, "
+        "sans aucun texte avant ou après : "
+        "{\"problematique\": true/false, \"raison\": \"courte raison ou null\"}\n\n"
+        "Considère problématique : insultes, racisme, sexisme, homophobie, "
+        "contenu pornographique, harcèlement, spam agressif.\n\n"
+        f"Message : {message.content}"
+    )
     try:
-        async with aiohttp.ClientSession() as s:
-            async with s.post(
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
                 "https://api.anthropic.com/v1/messages",
-                headers=headers, json=payload,
-                timeout=aiohttp.ClientTimeout(total=10)
+                headers={
+                    "x-api-key": ANTHROPIC_API_KEY,
+                    "anthropic-version": "2023-06-01",
+                    "content-type": "application/json"
+                },
+                json={
+                    "model": "claude-haiku-4-5-20251001",
+                    "max_tokens": 100,
+                    "messages": [{"role": "user", "content": prompt}]
+                }
             ) as resp:
                 data = await resp.json()
-                text = data["content"][0]["text"].strip()
-                text = text.replace("```json", "").replace("```", "").strip()
-                return json.loads(text)
+                text = re.sub(r"```json|```", "", data["content"][0]["text"]).strip()
+                result = json.loads(text)
+
+                if result.get("problematique"):
+                    await message.delete()
+                    raison = result.get("raison", "contenu inapproprié")
+
+                    try:
+                        await message.author.send(
+                            f"⚠️ **Cappetta | Le Sanctuaire** — Ton message a été supprimé.\n"
+                            f"Raison : **{raison}**\n"
+                            f"Merci de respecter les règles de la communauté 🙏"
+                        )
+                    except Exception:
+                        pass
+
+                    log_channel = get_channel(message.guild, SALON_SUPPORT)
+                    if log_channel:
+                        embed = discord.Embed(
+                            title="🚨 Message supprimé",
+                            color=0xe05050,
+                            timestamp=datetime.utcnow()
+                        )
+                        embed.add_field(name="Utilisateur", value=f"{message.author.mention} ({message.author})", inline=False)
+                        embed.add_field(name="Salon",       value=f"#{message.channel.name}", inline=True)
+                        embed.add_field(name="Raison",      value=raison, inline=True)
+                        embed.add_field(name="Message",     value=message.content[:500] or "—", inline=False)
+                        await log_channel.send(embed=embed)
     except Exception as e:
         print(f"[Modération] Erreur : {e}")
-        return {"violation": False, "type": "aucun", "raison": ""}
 
 # ── TWITCH ────────────────────────────────────────────────────────────────────
-async def refresh_twitch_token():
-    global twitch_token
-    async with aiohttp.ClientSession() as s:
-        async with s.post("https://id.twitch.tv/oauth2/token", params={
-            "client_id": TWITCH_CLIENT_ID,
-            "client_secret": TWITCH_SECRET,
-            "grant_type": "client_credentials"
-        }) as resp:
-            data = await resp.json()
-            twitch_token = data.get("access_token")
-
-async def is_twitch_live():
-    global twitch_token
-    if not TWITCH_CLIENT_ID:
-        return False
-    if not twitch_token:
-        await refresh_twitch_token()
+async def get_twitch_token():
+    global twitch_access_token
+    if not TWITCH_CLIENT_ID or not TWITCH_SECRET:
+        return
     try:
-        async with aiohttp.ClientSession() as s:
-            async with s.get(
-                f"https://api.twitch.tv/helix/streams?user_login={TWITCH_USERNAME}",
-                headers={"Client-ID": TWITCH_CLIENT_ID, "Authorization": f"Bearer {twitch_token}"}
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                "https://id.twitch.tv/oauth2/token",
+                params={
+                    "client_id": TWITCH_CLIENT_ID,
+                    "client_secret": TWITCH_SECRET,
+                    "grant_type": "client_credentials"
+                }
             ) as resp:
-                if resp.status == 401:
-                    await refresh_twitch_token()
-                    return False
                 data = await resp.json()
-                streams = data.get("data", [])
-                return streams[0] if streams else False
+                twitch_access_token = data.get("access_token")
+                print(f"[Twitch] Token OK")
     except Exception as e:
-        print(f"[Twitch] Erreur : {e}")
-        return False
+        print(f"[Twitch] Token error: {e}")
+
+async def check_twitch():
+    global was_live, twitch_access_token
+    if not TWITCH_CLIENT_ID or not twitch_access_token:
+        return
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                f"https://api.twitch.tv/helix/streams?user_login={TWITCH_USERNAME}",
+                headers={
+                    "Client-ID": TWITCH_CLIENT_ID,
+                    "Authorization": f"Bearer {twitch_access_token}"
+                }
+            ) as resp:
+                data   = await resp.json()
+                streams = data.get("data", [])
+                is_live = len(streams) > 0
+
+                if is_live and not was_live:
+                    was_live = True
+                    stream   = streams[0]
+                    for guild in bot.guilds:
+                        channel = get_channel(guild, SALON_LIVE)
+                        if channel:
+                            embed = discord.Embed(
+                                title=f"🔴 Cappetta est en LIVE sur Twitch !",
+                                description=stream.get("title", ""),
+                                color=0x9146FF,
+                                url=f"https://twitch.tv/{TWITCH_USERNAME}"
+                            )
+                            embed.add_field(name="🎮 Jeu",      value=stream.get("game_name", "—"), inline=True)
+                            embed.add_field(name="👀 Viewers",  value=stream.get("viewer_count", 0), inline=True)
+                            embed.set_footer(text="Twitch • Cappetta")
+                            await channel.send("@everyone", embed=embed)
+
+                elif not is_live and was_live:
+                    was_live = False
+    except Exception as e:
+        print(f"[Twitch] Check error: {e}")
+        await get_twitch_token()
 
 # ── TIKTOK ────────────────────────────────────────────────────────────────────
-async def get_latest_tiktok():
-    try:
-        async with aiohttp.ClientSession() as s:
-            async with s.get(
-                f"https://www.tiktok.com/@{TIKTOK_USERNAME}",
-                headers={"User-Agent": "Mozilla/5.0"},
-                timeout=aiohttp.ClientTimeout(total=10)
-            ) as resp:
-                html = await resp.text()
-                matches = re.findall(
-                    rf'https://www\.tiktok\.com/@{TIKTOK_USERNAME}/video/(\d+)', html
-                )
-                if matches:
-                    vid_id = matches[0]
-                    return f"https://www.tiktok.com/@{TIKTOK_USERNAME}/video/{vid_id}"
-    except Exception as e:
-        print(f"[TikTok] Erreur : {e}")
-    return None
-
-# ── INSTAGRAM ─────────────────────────────────────────────────────────────────
-async def get_latest_instagram():
-    try:
-        async with aiohttp.ClientSession() as s:
-            async with s.get(
-                f"https://www.instagram.com/{INSTAGRAM_USERNAME}/",
-                headers={"User-Agent": "Mozilla/5.0"},
-                timeout=aiohttp.ClientTimeout(total=10)
-            ) as resp:
-                html = await resp.text()
-                matches = re.findall(r'"shortcode":"([^"]+)"', html)
-                if matches:
-                    return f"https://www.instagram.com/p/{matches[0]}/"
-    except Exception as e:
-        print(f"[Instagram] Erreur : {e}")
-    return None
-
-# ── TÂCHES ────────────────────────────────────────────────────────────────────
-@tasks.loop(minutes=2)
-async def check_twitch():
-    global twitch_was_live
-    stream = await is_twitch_live()
-    for guild in bot.guilds:
-        ch = get_channel(guild, SALON_LIVE)
-        if not ch:
-            continue
-        if stream and not twitch_was_live:
-            twitch_was_live = True
-            embed = discord.Embed(
-                title="🔴 CAPPETTA EST EN LIVE !",
-                description=f"**{stream.get('title', 'Stream en cours')}**\n{'🎮 ' + stream.get('game_name','') if stream.get('game_name') else ''}",
-                color=0x9146FF,
-                url=f"https://twitch.tv/{TWITCH_USERNAME}"
-            )
-            embed.add_field(name="👀 Rejoindre", value=f"[twitch.tv/{TWITCH_USERNAME}](https://twitch.tv/{TWITCH_USERNAME})")
-            embed.set_footer(text=f"Live démarré • {datetime.now().strftime('%H:%M')}")
-            await ch.send("@everyone", embed=embed)
-        elif not stream and twitch_was_live:
-            twitch_was_live = False
-
-@tasks.loop(minutes=15)
 async def check_tiktok():
     global last_tiktok_url
-    url = await get_latest_tiktok()
-    if url and url != last_tiktok_url:
-        last_tiktok_url = url
-        for guild in bot.guilds:
-            ch = get_channel(guild, SALON_SOCIAL)
-            if ch:
-                embed = discord.Embed(
-                    title="🎵 Nouvelle vidéo TikTok !",
-                    description=f"**Cappetta** vient de poster une nouvelle vidéo !",
-                    color=0x010101, url=url
-                )
-                embed.add_field(name="▶️ Voir la vidéo", value=url)
-                embed.set_footer(text=f"TikTok • {datetime.now().strftime('%d/%m %H:%M')}")
-                await ch.send(embed=embed)
+    try:
+        async with aiohttp.ClientSession() as session:
+            url     = f"https://www.tiktok.com/@{TIKTOK_USERNAME}"
+            headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+            async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+                text    = await resp.text()
+                matches = re.findall(rf'/@{TIKTOK_USERNAME}/video/(\d+)', text)
+                if matches:
+                    latest_url = f"https://www.tiktok.com/@{TIKTOK_USERNAME}/video/{matches[0]}"
+                    if last_tiktok_url is None:
+                        last_tiktok_url = latest_url  # Init sans notifier
+                    elif latest_url != last_tiktok_url:
+                        last_tiktok_url = latest_url
+                        for guild in bot.guilds:
+                            channel = get_channel(guild, SALON_SOCIAL)
+                            if channel:
+                                embed = discord.Embed(
+                                    title="🎵 Nouveau tuto TikTok !",
+                                    description=f"[Voir la vidéo]({latest_url})",
+                                    color=0x010101,
+                                    url=latest_url
+                                )
+                                embed.set_footer(text="TikTok • @cappetta_art")
+                                await channel.send(embed=embed)
+    except Exception as e:
+        print(f"[TikTok] Error: {e}")
 
-@tasks.loop(minutes=20)
+# ── INSTAGRAM ─────────────────────────────────────────────────────────────────
 async def check_instagram():
     global last_instagram_url
-    url = await get_latest_instagram()
-    if url and url != last_instagram_url:
-        last_instagram_url = url
-        for guild in bot.guilds:
-            ch = get_channel(guild, SALON_SOCIAL)
-            if ch:
-                embed = discord.Embed(
-                    title="📸 Nouvelle publication Instagram !",
-                    description=f"**Cappetta** vient de poster sur Instagram !",
-                    color=0xE1306C, url=url
-                )
-                embed.add_field(name="🔗 Voir la publication", value=url)
-                embed.set_footer(text=f"Instagram • {datetime.now().strftime('%d/%m %H:%M')}")
-                await ch.send(embed=embed)
+    try:
+        async with aiohttp.ClientSession() as session:
+            url     = f"https://www.instagram.com/{INSTAGRAM_USERNAME}/"
+            headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+            async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+                text    = await resp.text()
+                matches = re.findall(r'"shortcode":"([A-Za-z0-9_-]+)"', text)
+                if matches:
+                    latest_url = f"https://www.instagram.com/p/{matches[0]}/"
+                    if last_instagram_url is None:
+                        last_instagram_url = latest_url
+                    elif latest_url != last_instagram_url:
+                        last_instagram_url = latest_url
+                        for guild in bot.guilds:
+                            channel = get_channel(guild, SALON_SOCIAL)
+                            if channel:
+                                embed = discord.Embed(
+                                    title="📸 Nouveau post Instagram !",
+                                    description=f"[Voir le post]({latest_url})",
+                                    color=0xE1306C,
+                                    url=latest_url
+                                )
+                                embed.set_footer(text="Instagram • @cappetta_art")
+                                await channel.send(embed=embed)
+    except Exception as e:
+        print(f"[Instagram] Error: {e}")
 
+# ── LOOPS ─────────────────────────────────────────────────────────────────────
 @tasks.loop(minutes=14)
 async def keep_alive():
-    """Empêche Render de mettre le bot en veille."""
-    url = os.environ.get("RENDER_EXTERNAL_URL")
-    if url:
-        try:
-            async with aiohttp.ClientSession() as s:
-                await s.get(url, timeout=aiohttp.ClientTimeout(total=5))
-        except:
-            pass
+    print(f"[Keep-alive] {datetime.utcnow().strftime('%H:%M:%S')} ✓")
+
+@tasks.loop(minutes=2)
+async def twitch_loop():
+    await check_twitch()
+
+@tasks.loop(minutes=30)
+async def social_loop():
+    await check_tiktok()
+    await check_instagram()
 
 # ── EVENTS ────────────────────────────────────────────────────────────────────
 @bot.event
 async def on_ready():
-    print(f"✅ {bot.user} connecté — {len(bot.guilds)} serveur(s)")
-    check_twitch.start()
-    check_tiktok.start()
-    check_instagram.start()
+    print(f"[Bot] ✅ Connecté en tant que {bot.user}")
+    await get_twitch_token()
     keep_alive.start()
-    await bot.change_presence(activity=discord.Activity(
-        type=discord.ActivityType.watching, name="le sanctuaire 🎨"
-    ))
+    twitch_loop.start()
+    social_loop.start()
+
+async def main():
+    await start_webserver()
+    await bot.start(DISCORD_TOKEN)
 
 @bot.event
 async def on_message(message):
     if message.author.bot:
         return
-    if message.author.guild_permissions.administrator:
-        await bot.process_commands(message)
-        return
-
-    result = await analyze_message(message.content)
-
-    if result.get("violation"):
-        try:
-            await message.delete()
-        except discord.Forbidden:
-            pass
-
-        # DM à l'auteur
-        try:
-            await message.author.send(
-                f"⚠️ **Message supprimé — Cappetta | Le Sanctuaire**\n"
-                f"Raison : {result.get('raison', 'Contenu inapproprié')}\n"
-                f"Merci de respecter les règles du serveur 🙏"
-            )
-        except discord.Forbidden:
-            pass
-
-        # Log dans #Support
-        for guild in bot.guilds:
-            log_ch = get_channel(guild, SALON_SUPPORT)
-            if log_ch:
-                embed = discord.Embed(title="🚨 Message supprimé", color=0xFF4444)
-                embed.add_field(name="Auteur", value=f"{message.author.mention}", inline=True)
-                embed.add_field(name="Salon", value=f"{message.channel.mention}", inline=True)
-                embed.add_field(name="Type", value=result.get("type", "?"), inline=True)
-                embed.add_field(name="Raison", value=result.get("raison", "?"), inline=False)
-                embed.add_field(name="Contenu", value=f"||{message.content[:200]}||", inline=False)
-                embed.set_footer(text=datetime.now().strftime("%d/%m/%Y %H:%M"))
-                await log_ch.send(embed=embed)
-
+    await moderer_message(message)
     await bot.process_commands(message)
 
 # ── COMMANDES ADMIN ───────────────────────────────────────────────────────────
-@bot.command(name="live")
+@bot.command(name="status")
 @commands.has_permissions(administrator=True)
-async def annonce_live(ctx, *, titre="Stream en cours !"):
-    """!live [titre] — Annonce manuelle dans #En LIVE"""
-    ch = get_channel(ctx.guild, SALON_LIVE)
-    if ch:
+async def status(ctx):
+    embed = discord.Embed(title="🤖 Cappetta Bot — Statut", color=0x4a9068)
+    embed.add_field(name="🛡️ Modération",       value="✅ Active",       inline=True)
+    embed.add_field(name="🎮 Twitch",            value="✅ Surveillance", inline=True)
+    embed.add_field(name="📱 TikTok/Instagram",  value="✅ Surveillance", inline=True)
+    embed.add_field(name="🔴 Live en cours",     value="Oui" if was_live else "Non", inline=True)
+    embed.add_field(name="Dernier TikTok",       value=last_tiktok_url or "—",      inline=False)
+    embed.add_field(name="Dernier Instagram",    value=last_instagram_url or "—",   inline=False)
+    await ctx.send(embed=embed)
+
+@bot.command(name="testlive")
+@commands.has_permissions(administrator=True)
+async def testlive(ctx):
+    channel = get_channel(ctx.guild, SALON_LIVE)
+    if channel:
         embed = discord.Embed(
-            title="🔴 CAPPETTA EST EN LIVE !",
-            description=f"**{titre}**",
+            title="🔴 Cappetta est en LIVE sur Twitch ! [TEST]",
+            description="Ceci est un test d'alerte",
             color=0x9146FF,
             url=f"https://twitch.tv/{TWITCH_USERNAME}"
         )
-        embed.add_field(name="👀 Rejoindre", value=f"[twitch.tv/{TWITCH_USERNAME}](https://twitch.tv/{TWITCH_USERNAME})")
-        await ch.send("@everyone", embed=embed)
-        await ctx.message.delete()
+        embed.set_footer(text="Test • Cappetta Bot")
+        await channel.send(embed=embed)
+        await ctx.send(f"✅ Test envoyé dans #{SALON_LIVE}")
+    else:
+        await ctx.send(f"❌ Salon '{SALON_LIVE}' introuvable")
 
-@bot.command(name="status")
-@commands.has_permissions(administrator=True)
-async def bot_status(ctx):
-    """!status — Vérifie que tout tourne"""
-    stream = await is_twitch_live()
-    embed = discord.Embed(title="📊 Cappetta Bot — Status", color=0x4a9068)
-    embed.add_field(name="🤖 Bot",       value="✅ En ligne",              inline=True)
-    embed.add_field(name="🎮 Twitch",    value="🔴 EN LIVE" if stream else "⚫ Offline", inline=True)
-    embed.add_field(name="🎵 TikTok",    value="✅ Surveillance active",    inline=True)
-    embed.add_field(name="📸 Instagram", value="✅ Surveillance active",    inline=True)
-    await ctx.send(embed=embed)
-
-# ── RUN ───────────────────────────────────────────────────────────────────────
-bot.run(DISCORD_TOKEN)
+if __name__ == "__main__":
+    asyncio.run(main())
