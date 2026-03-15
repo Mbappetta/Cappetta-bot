@@ -32,7 +32,7 @@ TWITCH_USERNAME    = "Cappetta"
 TIKTOK_USERNAME    = "cappetta_art"
 INSTAGRAM_USERNAME = "cappetta_art"
 
-SALON_LIVE         = "| En LIVE"
+SALON_LIVE         = "en-live"
 SALON_SOCIAL       = "| Social-media"
 SALON_SUPPORT      = "| Support"
 
