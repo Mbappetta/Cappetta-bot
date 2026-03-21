@@ -233,7 +233,7 @@ async def check_instagram():
         print(f"[Instagram] Error: {e}")
 
 # ── LOOPS ─────────────────────────────────────────────────────────────────────
-python@tasks.loop(minutes=14)
+@tasks.loop(minutes=14)
 async def keep_alive():
     try:
         async with aiohttp.ClientSession() as session:
