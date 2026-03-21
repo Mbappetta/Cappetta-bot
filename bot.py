@@ -233,9 +233,19 @@ async def check_instagram():
         print(f"[Instagram] Error: {e}")
 
 # ── LOOPS ─────────────────────────────────────────────────────────────────────
-@tasks.loop(minutes=14)
+python@tasks.loop(minutes=14)
 async def keep_alive():
-    print(f"[Keep-alive] {datetime.utcnow().strftime('%H:%M:%S')} ✓")
+    try:
+        async with aiohttp.ClientSession() as session:
+            url = os.environ.get("RENDER_EXTERNAL_URL", "http://localhost:10000")
+            async with session.get(url) as resp:
+                print(f"[Keep-alive] {resp.status} ✓")
+    except Exception as e:
+        print(f"[Keep-alive] Erreur: {e}")
+       
+@tasks.loop(hours=24)
+async def refresh_token_loop():
+    await get_twitch_token()
 
 @tasks.loop(minutes=2)
 async def twitch_loop():
@@ -254,6 +264,7 @@ async def on_ready():
     keep_alive.start()
     twitch_loop.start()
     social_loop.start()
+    refresh_token_loop.start()
 
 async def main():
     await start_webserver()
