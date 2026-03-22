@@ -309,3 +309,16 @@ async def testlive(ctx):
 
 if __name__ == "__main__":
     asyncio.run(main())
+
+
+@bot.command(name="discord")
+async def lien_discord(ctx):
+    await ctx.send("https://discord.gg/TON_LIEN_ICI")
+
+@bot.command(name="tiktok")
+async def lien_tiktok(ctx):
+    await ctx.send("https://www.tiktok.com/@cappetta_art")
+
+@bot.command(name="instagram")
+async def lien_instagram(ctx):
+    await ctx.send("https://www.instagram.com/cappetta_art")
