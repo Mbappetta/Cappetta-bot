@@ -313,7 +313,7 @@ if __name__ == "__main__":
 
 @bot.command(name="discord")
 async def lien_discord(ctx):
-    await ctx.send("https://discord.gg/TON_LIEN_ICI")
+    await ctx.send("https://discord.gg/wwfmncP8d4")
 
 @bot.command(name="tiktok")
 async def lien_tiktok(ctx):
